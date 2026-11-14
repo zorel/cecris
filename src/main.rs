@@ -3,6 +3,7 @@ mod http;
 mod hub;
 mod proto;
 mod server;
+mod shutdown;
 mod util;
 mod ws;
 
@@ -98,11 +99,16 @@ fn main() {
 
     let hub = Arc::new(hub::Hub::new());
 
+    shutdown::install();
+
     {
         let hub = hub.clone();
         thread::spawn(move || loop {
             thread::sleep(Duration::from_millis(10));
-            hub.tick();
+            if hub.tick() {
+                println!("cecris: no games in progress — shutting down");
+                std::process::exit(0);
+            }
         });
     }
 

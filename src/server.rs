@@ -51,6 +51,17 @@ pub fn handle(mut stream: TcpStream, hub: Arc<Hub>) {
         ("GET", "/healthz") => {
             let _ = http::text(&mut stream, 200, "OK", "ok");
         }
+        ("GET", "/api/status") => {
+            let body = hub.status_json();
+            let _ = http::respond_with(
+                &mut stream,
+                200,
+                "OK",
+                "application/json",
+                body.as_bytes(),
+                NO_STORE,
+            );
+        }
         ("GET", "/api/rooms") => {
             let body = hub.rooms_json();
             let _ = http::json(&mut stream, 200, "OK", &body);

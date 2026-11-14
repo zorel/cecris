@@ -6,7 +6,7 @@ BIN     ?= target/release/cecris
 E2E_LOG ?= e2e-server.log
 
 .DEFAULT_GOAL := help
-.PHONY: help build release run dev test e2e check fmt lint clean
+.PHONY: help build release run dev test e2e maintenance check fmt lint clean
 
 help:
 	@echo "cecris"
@@ -17,7 +17,8 @@ help:
 	@echo "  make dev      cargo run --release"
 	@echo "  make test     cargo test"
 	@echo "  make e2e      release build, start server, run protocol e2e tests"
-	@echo "  make check    test + e2e"
+	@echo "  make maintenance  graceful SIGTERM shutdown test"
+	@echo "  make check    test + e2e + maintenance"
 	@echo "  make fmt      cargo fmt"
 	@echo "  make lint     cargo clippy -D warnings"
 	@echo "  make clean    remove build output and e2e log"
@@ -56,7 +57,10 @@ e2e: release
 	if [ -z "$$ready" ]; then echo "server failed to start; see $(E2E_LOG)" >&2; exit 1; fi; \
 	BASE=http://127.0.0.1:8099 $(NODE) tests/e2e.mjs
 
-check: test e2e
+maintenance: release
+	$(NODE) tests/maintenance.mjs
+
+check: test e2e maintenance
 
 fmt:
 	$(CARGO) fmt --all

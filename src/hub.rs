@@ -55,6 +55,7 @@ pub struct Room {
     pub game: Option<Game>,
     pub options: GameOptions,
     pub host: u8,
+    maintenance_notified: bool,
     pub start_at: Option<Instant>,
     pub over_deadline: Option<Instant>,
     pub empty_since: Option<Instant>,
@@ -74,6 +75,7 @@ impl Room {
             game: None,
             options: GameOptions::default(),
             host: 0,
+            maintenance_notified: false,
             start_at: None,
             over_deadline: None,
             empty_since: None,
@@ -114,6 +116,23 @@ impl Room {
         conn: Conn,
     ) -> Result<(u8, String), String> {
         let now = Instant::now();
+
+        if crate::shutdown::maintenance() {
+            let reconnect = token
+                .as_deref()
+                .map(|tok| {
+                    self.slots
+                        .iter()
+                        .any(|s| s.as_ref().map(|s| s.token == tok).unwrap_or(false))
+                })
+                .unwrap_or(false);
+            if !reconnect {
+                return Err(
+                    "maintenance: new games are disabled while the server waits for running games"
+                        .to_string(),
+                );
+            }
+        }
 
         if let Some(tok) = token.as_deref() {
             if let Some(idx) = self
@@ -237,6 +256,22 @@ impl Room {
             .count()
     }
 
+    pub fn is_active_game(&self) -> bool {
+        self.phase == Phase::Playing && self.connected_count() > 0
+    }
+
+    pub fn enter_maintenance(&mut self) {
+        if self.phase == Phase::Countdown {
+            self.phase = Phase::Lobby;
+            self.start_at = None;
+            self.lobby_dirty = true;
+        }
+        if !self.maintenance_notified {
+            self.maintenance_notified = true;
+            self.lobby_dirty = true;
+        }
+    }
+
     fn all_ready(&self) -> bool {
         let mut connected = 0;
         for slot in self.slots.iter().flatten() {
@@ -322,6 +357,14 @@ impl Room {
             o.special_capacity,
             if o.line_attacks { "true" } else { "false" }
         ));
+        out.push_str(&format!(
+            ",\"maintenance\":{}",
+            if crate::shutdown::maintenance() {
+                "true"
+            } else {
+                "false"
+            }
+        ));
         out.push_str(",\"players\":[");
         let mut first = true;
         for slot in self.slots.iter().flatten() {
@@ -385,6 +428,13 @@ impl Room {
                 }
             }
             ClientMsg::Start => {
+                if crate::shutdown::maintenance() {
+                    self.send_error(
+                        idx,
+                        "maintenance: new games are disabled while the server waits for running games",
+                    );
+                    return;
+                }
                 if self.phase != Phase::Lobby {
                     self.send_error(idx, "game already starting");
                     return;
@@ -494,6 +544,12 @@ impl Room {
     }
 
     fn begin_game(&mut self, now: Instant) {
+        if crate::shutdown::maintenance() {
+            self.phase = Phase::Lobby;
+            self.start_at = None;
+            self.lobby_dirty = true;
+            return;
+        }
         let ids: Vec<u8> = self
             .slots
             .iter()
@@ -543,7 +599,11 @@ impl Room {
     pub fn tick(&mut self, now: Instant) {
         match self.phase {
             Phase::Countdown => {
-                if let Some(at) = self.start_at {
+                if crate::shutdown::maintenance() {
+                    self.phase = Phase::Lobby;
+                    self.start_at = None;
+                    self.lobby_dirty = true;
+                } else if let Some(at) = self.start_at {
                     if now >= at {
                         self.begin_game(now);
                     } else {
@@ -672,8 +732,15 @@ impl Hub {
         token: Option<String>,
         conn: Conn,
     ) -> Result<(Arc<Mutex<Room>>, u8, String), String> {
+        let maintenance = crate::shutdown::maintenance();
         let room = {
             let mut rooms = self.rooms.lock().unwrap();
+            if maintenance && !rooms.contains_key(game_id) {
+                return Err(
+                    "maintenance: new games are disabled while the server waits for running games"
+                        .to_string(),
+                );
+            }
             rooms
                 .entry(game_id.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(Room::new(game_id.to_string()))))
@@ -685,16 +752,24 @@ impl Hub {
         Ok((room, player, token_out))
     }
 
-    pub fn tick(&self) {
+    pub fn tick(&self) -> bool {
+        let maintenance = crate::shutdown::maintenance();
         let rooms: Vec<Arc<Mutex<Room>>> = {
             let map = self.rooms.lock().unwrap();
             map.values().cloned().collect()
         };
         let now = Instant::now();
         let mut doomed = Vec::new();
+        let mut active = 0;
         for arc in rooms {
             let mut room = arc.lock().unwrap();
+            if maintenance {
+                room.enter_maintenance();
+            }
             room.tick(now);
+            if room.is_active_game() {
+                active += 1;
+            }
             if room.doomed {
                 doomed.push(room.id.clone());
             }
@@ -705,6 +780,30 @@ impl Hub {
                 map.remove(&id);
             }
         }
+        maintenance && active == 0
+    }
+
+    pub fn status_json(&self) -> String {
+        let rooms: Vec<Arc<Mutex<Room>>> = {
+            let map = self.rooms.lock().unwrap();
+            map.values().cloned().collect()
+        };
+        let mut active = 0;
+        for arc in rooms {
+            let room = arc.lock().unwrap();
+            if room.is_active_game() {
+                active += 1;
+            }
+        }
+        format!(
+            "{{\"maintenance\":{},\"activeGames\":{}}}",
+            if crate::shutdown::maintenance() {
+                "true"
+            } else {
+                "false"
+            },
+            active
+        )
     }
 
     pub fn rooms_json(&self) -> String {

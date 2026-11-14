@@ -69,6 +69,28 @@ button { font: inherit; }
   margin: 12px 0 22px;
 }
 
+.live-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -8px 0 18px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.live-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 8px rgba(74, 222, 128, 0.6);
+}
+.live-maintenance {
+  color: var(--warn);
+  font-weight: 600;
+}
+
 .fine {
   color: var(--muted);
   font-size: 12px;

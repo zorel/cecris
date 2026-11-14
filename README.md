@@ -208,9 +208,31 @@ players in the current round from players waiting for the next one.
 3. Force the fallback with `…/g/<id>?transport=sse`; the client otherwise tries
    WebSocket first and drops to SSE on failure, with exponential reconnect backoff.
 
+`GET /api/status` is a small, uncached JSON endpoint:
+
+```json
+{"maintenance":false,"activeGames":1}
+```
+
+The landing page polls it every 2 seconds to show how many rounds are in progress and
+whether the server is in maintenance.
+
 All sockets are `TCP_NODELAY`; state application is immediate and the rule engine runs
 on a 10 ms tick with 45 ms state broadcasts. Moves are applied on arrival, so input
 latency is one network RTT, not one tick.
+
+### Shutdown and maintenance
+
+Sending `SIGTERM` (`kill -15`) puts the server into maintenance mode:
+
+- Existing rounds keep running and streaming.
+- Pending countdowns are cancelled; new rooms, joins, and round starts are rejected
+  with a maintenance message.
+- The process exits with status 0 once no game with connected players remains.
+- If no game is active at signal time, it exits immediately.
+
+The landing page shows the maintenance state and the running-game count; invite links
+opened during maintenance show a “New games paused” overlay.
 
 ## Architecture
 
@@ -222,9 +244,11 @@ src/game.rs     board, pieces, gravity, line clears, specials, scoring (unit-tes
 src/proto.rs    frame encoding/decoding and packing
 src/http.rs     tiny HTTP/1.1 request parser and responses
 src/ws.rs       WebSocket handshake, frame reader/writer, fragmentation
+src/shutdown.rs SIGTERM flag and maintenance mode
 src/util.rs     SHA-1, base64, query parsing, sanitisation, RNG
-web/            single-page client (canvas, prediction, chat, invite link)
+web/            single-page client (canvas, prediction, chat, invite link, live status)
 tests/e2e.mjs   protocol integration test (Node 22+)
+tests/maintenance.mjs  SIGTERM/maintenance integration test
 ```
 
 The server is server-authoritative: clients send inputs, never board states. Each room
@@ -240,7 +264,8 @@ fragmentation), SHA-1/base64 for the handshake, and all game logic are in-tree.
 ```sh
 make test           # rules, specials, protocol packing, SHA-1/WebSocket vectors
 make e2e            # release build, starts a server on 127.0.0.1:8099, runs e2e
-make check          # both
+make maintenance    # SIGTERM: wait for games, refuse new ones, exit afterwards
+make check          # all of the above
 ```
 
 `make run` serves on the fixed address `127.0.0.1:8099`. For any other address run
@@ -257,6 +282,10 @@ state-frame rate, chat, board diffs, readiness gating and the 3-second countdown
 host-edited options visible to a joiner and applied to the next round, an SSE player
 (including POSTed inputs and readiness), a parallel second room, and reconnect-with-token
 into a running game.
+
+The maintenance test spawns its own server and verifies both shutdown paths: immediate
+exit when idle, and a running game that stays up, rejects new games with a maintenance
+message, keeps streaming to existing players, then exits after the round ends.
 
 ## Deployment
 

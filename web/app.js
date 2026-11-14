@@ -93,6 +93,8 @@
     opp: {},
     keys: { left: false, right: false, down: false, nextLeft: 0, nextRight: 0, nextDown: 0 },
     forceSse: false,
+    maintenance: false,
+    statusTimer: null,
   };
 
   const ui = {};
@@ -120,6 +122,49 @@
   function sanitizeNick(raw) {
     const s = String(raw || "").replace(/[\u0000-\u001f<>"'&]/g, "").trim().slice(0, 16);
     return s || "player";
+  }
+
+  async function fetchStatus() {
+    const res = await fetch("/api/status", { cache: "no-store" });
+    if (!res.ok) return null;
+    return res.json();
+  }
+
+  function stopStatusPolling() {
+    if (state.statusTimer) {
+      clearInterval(state.statusTimer);
+      state.statusTimer = null;
+    }
+  }
+
+  async function pollStatus() {
+    const countEl = $("liveCount");
+    if (!countEl) {
+      stopStatusPolling();
+      return;
+    }
+    try {
+      const data = await fetchStatus();
+      if (!data) throw new Error("status unavailable");
+      state.maintenance = !!data.maintenance;
+      const games = data.activeGames || 0;
+      countEl.textContent =
+        games === 0 ? "no games in progress" :
+        games === 1 ? "1 game in progress" :
+        `${games} games in progress`;
+      const maintenanceEl = $("liveMaintenance");
+      if (maintenanceEl) maintenanceEl.classList.toggle("hidden", !state.maintenance);
+      const submit = $("landingSubmit");
+      if (submit) submit.disabled = state.maintenance;
+    } catch (_) {
+      countEl.textContent = "server unreachable";
+    }
+  }
+
+  function startStatusPolling() {
+    stopStatusPolling();
+    pollStatus();
+    state.statusTimer = setInterval(pollStatus, 2000);
   }
 
   function tokenKey(game) {
@@ -204,6 +249,11 @@
         <div class="landing-card">
           <div class="logo">CE<span>CRIS</span></div>
           <p class="tag">Real-time multiplayer block battle. 2–6 players per room, special attacks, invite links.</p>
+          <div class="live-status">
+            <span class="live-dot"></span>
+            <span id="liveCount">checking server…</span>
+            <span id="liveMaintenance" class="live-maintenance hidden">maintenance — new games paused</span>
+          </div>
           <form id="landingForm">
             <label>Nickname
               <input id="landingNick" maxlength="16" autocomplete="nickname" placeholder="your name">
@@ -212,7 +262,7 @@
               <input id="landingGame" maxlength="32" autocomplete="off" placeholder="e.g. friday-night" pattern="[A-Za-z0-9_-]{1,32}">
             </label>
             <div class="row">
-              <button class="primary" type="submit">Enter room</button>
+              <button class="primary" type="submit" id="landingSubmit">Enter room</button>
               <button type="button" id="randomGame" class="ghost">Random code</button>
             </div>
           </form>
@@ -231,6 +281,7 @@
     });
     $("landingForm").addEventListener("submit", (e) => {
       e.preventDefault();
+      if (state.maintenance) return;
       const nick = sanitizeNick($("landingNick").value);
       const game = sanitizeGameId($("landingGame").value);
       if (!game) {
@@ -241,9 +292,11 @@
       else if (nick) localStorage.setItem("cecris_nick", nick);
       location.href = "/g/" + encodeURIComponent(game);
     });
+    startStatusPolling();
   }
 
   function renderJoinPrompt() {
+    stopStatusPolling();
     document.title = "Join " + state.gameId + " · cecris";
     app.innerHTML = `
       <div class="landing">
@@ -274,6 +327,7 @@
 
   function buildRoom() {
     if (state.roomBuilt) return;
+    stopStatusPolling();
     state.roomBuilt = true;
     document.title = state.gameId + " · cecris";
     app.innerHTML = `
@@ -481,12 +535,32 @@
     ui.transport.className = "badge " + (kind === "ws" ? "ok" : kind === "sse" ? "warn" : kind === "offline" ? "bad" : "");
   }
 
-  function connect() {
+  async function connect() {
     clearTimeout(state.reconnectTimer);
     state.reconnectTimer = null;
     closeTransports();
+    const status = await fetchStatus().catch(() => null);
+    if (status && status.maintenance) {
+      showMaintenance();
+      return;
+    }
+    state.maintenance = false;
     if (state.forceSse) startSSE();
     else tryWebSocket();
+  }
+
+  function showMaintenance() {
+    state.maintenance = true;
+    closeTransports();
+    setTransport("offline");
+    if (!ui.overlay) return;
+    ui.overlay.classList.remove("hidden");
+    ui.overlay.innerHTML = `
+      <div class="overlay-card">
+        <div class="eyebrow">maintenance</div>
+        <h2>New games paused</h2>
+        <p>The server is waiting for running rounds to finish. Reload later to play.</p>
+      </div>`;
   }
 
   function closeTransports() {
@@ -518,7 +592,7 @@
     try {
       ws = new WebSocket(url);
     } catch (_) {
-      startSSE();
+      void handleTransportFailure(false);
       return;
     }
     ws.binaryType = "arraybuffer";
@@ -550,7 +624,7 @@
         setTransport("offline");
         scheduleReconnect(700);
       } else {
-        startSSE();
+        void handleTransportFailure(false);
       }
     };
     ws.onerror = () => {};
@@ -595,8 +669,18 @@
       state.es = null;
       state.sid = null;
       if (state.transport === "sse") setTransport("offline");
-      scheduleReconnect(1500);
+      void handleTransportFailure(true);
     });
+  }
+
+  async function handleTransportFailure(fromSse) {
+    const status = await fetchStatus().catch(() => null);
+    if (status && status.maintenance) {
+      showMaintenance();
+      return;
+    }
+    if (!fromSse && !state.forceSse && state.retry === 0) startSSE();
+    else scheduleReconnect(1500);
   }
 
   function scheduleReconnect(delay) {
@@ -605,9 +689,7 @@
     state.retry = Math.min(state.retry + 1, 6);
     state.reconnectTimer = setTimeout(() => {
       state.reconnectTimer = null;
-      closeTransports();
-      if (state.forceSse) startSSE();
-      else tryWebSocket();
+      void connect();
     }, wait);
   }
 
@@ -783,6 +865,7 @@
     state.host = data.host || 0;
     state.winner = data.winner || 0;
     state.cd = data.cd || 0;
+    state.maintenance = !!data.maintenance;
     state.options = Object.assign({}, DEFAULT_OPTIONS, data.options || {});
 
     if (data.phase === "lobby" || data.phase === "countdown") {
@@ -970,14 +1053,16 @@
       state.phase === "countdown" ? "get ready…" :
       `${connectedCount()}/6 connected · ${readyCount}/${connectedCount()} ready`;
 
-    ui.readyBtn.disabled = state.phase !== "lobby";
+    ui.readyBtn.disabled = state.phase !== "lobby" || state.maintenance;
     ui.readyBtn.textContent = iAmReady ? "Cancel ready" : "Ready";
     ui.readyBtn.classList.toggle("on", iAmReady);
-    ui.startBtn.disabled = !(isHost && state.phase === "lobby" && allReady);
+    ui.startBtn.disabled = !(isHost && state.phase === "lobby" && allReady && !state.maintenance);
     ui.startBtn.textContent = state.phase === "countdown" ? "Starting…" : "Start game";
 
     let hint = "";
-    if (state.phase === "countdown") {
+    if (state.maintenance) {
+      hint = "maintenance: new games are disabled while running rounds finish";
+    } else if (state.phase === "countdown") {
       hint = "";
     } else if (!isHost) {
       hint = allReady

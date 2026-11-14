@@ -248,6 +248,12 @@ function rowsFromPacked(packed) {
 async function main() {
   const health = await fetch(`${BASE}/healthz`);
   ok("healthz", health.ok && (await health.text()) === "ok");
+  const initialStatus = await (await fetch(`${BASE}/api/status`)).json();
+  ok(
+    "status endpoint",
+    initialStatus.maintenance === false && initialStatus.activeGames === 0,
+    JSON.stringify(initialStatus)
+  );
 
   const index = await fetch(`${BASE}/g/probe-room`);
   const html = await index.text();
@@ -317,6 +323,8 @@ async function main() {
   await waitFor(() => a1.lobby.phase === "playing" && a2.lobby.phase === "playing", 6000, "playing phase");
   await waitFor(() => a1.snapshots.length >= 1, 2000, "start snapshot");
   ok("snapshot boards empty", a1.snapshots[0].every((b) => b.packed.every((x) => x === 0)));
+  const playingStatus = await (await fetch(`${BASE}/api/status`)).json();
+  ok("active games counted", playingStatus.activeGames >= 1, JSON.stringify(playingStatus));
 
   const before = a1.states.length;
   await sleep(700);
