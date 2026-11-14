@@ -298,3 +298,10 @@ server, reload an already-open tab once — a tab still running an older client 
 
 There is no account system: the reconnect token in `sessionStorage` is a bearer
 capability for one player slot, and room ids are public.
+
+## License
+
+Copyright 2026 Aurélien DEHAY.
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full
+text.
